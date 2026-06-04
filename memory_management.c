@@ -28,6 +28,15 @@
 #include <windows.h>   /* SetConsoleOutputCP —— Windows 控制台 UTF-8 编码支持 */
 #endif
 
+/*
+ * 强制 MSVC 将字符串字面量编译为 UTF-8（执行字符集）
+ * 否则 MSVC 默认按系统 ANSI（中文 Windows 为 GBK）编码字符串，
+ * 与 SetConsoleOutputCP(65001) 的 UTF-8 控制台不匹配，导致中文乱码
+ */
+#ifdef _MSC_VER
+#pragma execution_character_set("utf-8")
+#endif
+
 /* ============================================================
  *                  公共常量与宏定义
  * ============================================================ */
