@@ -654,41 +654,20 @@ static void generate_locality_sequence(int seq[], int length, int max_page)
 }
 
 /*
- * 生成一个必定触发 Belady 异常的页面引用串
+ * 随机生成一个页面引用串（用于枚举寻找 Belady 异常）
  *
- * 构造规则：
- *   固定骨架：[1, 2, 3, X, 1, 2, Y, 1, 2, 3, X, Y]
- *   锡点 A=1, B=2, C=3 永远不变
- *   X, Y 随机选取，约束：X != Y，且 X, Y 都不等于 1, 2, 3
+ * 规则：生成 length 个随机页面号（0 ~ max_page-1）
  *
- * 数学保证：FIFO 在 3 帧下的缺页次数 < 4 帧下的缺页次数
- *            即 100% 触发 Belady 异常
- *
- * 参数：seq      —— 输出数组（至少 12 个元素）
- *       max_page —— 页面号上限（需 >= 6，从 4~max_page-1 中选 X,Y）
- * 返回：序列长度，固定为 12
+ * 参数：seq      —— 输出数组
+ *       length   —— 序列长度
+ *       max_page —— 页面号上限（0 ~ max_page-1）
  */
-static int generate_belady_sequence(int seq[], int max_page)
+static void generate_random_sequence(int seq[], int length, int max_page)
 {
-    int x, y;
-
-    /* 随机选取 X：从 4 到 max_page-1 */
-    x = 4 + rand() % (max_page - 4);
-
-    /* 随机选取 Y：从 4 到 max_page-1，且 Y != X */
-    do {
-        y = 4 + rand() % (max_page - 4);
-    } while (y == x);
-
-    /* 固定骨架：[1, 2, 3, X, 1, 2, Y, 1, 2, 3, X, Y] */
-    seq[0]  = 1;  seq[1]  = 2;  seq[2]  = 3;
-    seq[3]  = x;
-    seq[4]  = 1;  seq[5]  = 2;
-    seq[6]  = y;
-    seq[7]  = 1;  seq[8]  = 2;  seq[9]  = 3;
-    seq[10] = x;  seq[11] = y;
-
-    return 12;
+    int i;
+    for (i = 0; i < length; i++) {
+        seq[i] = rand() % max_page;
+    }
 }
 
 /*
@@ -883,72 +862,71 @@ static void task2_page_replacement(void)
     }
 
     /*
-     * ---- 2.4 Belady 异常专项验证（规则化随机生成） ----
+     * ---- 2.4 Belady 异常专项验证（随机生成 + 枚举验证） ----
      *
-     * 构造规则：
-     *   固定骨架 [1, 2, 3, X, 1, 2, Y, 1, 2, 3, 1, 2]
-     *   锡点 A=1, B=2, C=3 永远不变
-     *   X, Y 随机选取，约束：X != Y，且 X, Y 都不等于 1, 2, 3
-     *   FIFO 3 帧缺页数 < 4 帧缺页数，100% 触发 Belady 异常
+     * 方法：随机生成页面引用串，用 FIFO 分别在 3 帧和 4 帧下运行，
+     *       如果 4 帧缺页 > 3 帧缺页，则找到 Belady 异常，输出结果；
+     *       否则重新生成，直到找到为止。
+     *
+     * 规则：序列长度 12，页面号范围 1~5（共 5 种页面）
+     *       这个范围确保页面数 > 帧数，提高命中概率
      */
     {
-        int belady_seq[MAX_PAGES];   /* 生成的 Belady 序列 */
-        int belady_len;              /* 序列长度，固定 12 */
+        int belady_seq[MAX_PAGES];   /* 生成的序列 */
+        int belady_len = 12;         /* 序列长度固定 12 */
         int round;                   /* 轮次计数 */
         int faults_3, faults_4;      /* 3 帧和 4 帧的缺页次数 */
-        int success_count = 0;       /* 成功触发异常的轮次数 */
+        int attempts;                /* 本轮尝试次数 */
         FILE *csv_belady;            /* CSV 文件指针 */
 
         printf("──────────────────────────────────────────\n");
-        printf("  Belady 异常专项验证（规则化随机生成）\n");
+        printf("  Belady 异常专项验证（随机生成 + 枚举验证）\n");
         printf("──────────────────────────────────────────\n");
-        printf("  构造规则：\n");
-        printf("    固定骨架：[1, 2, 3, X, 1, 2, Y, 1, 2, 3, X, Y]\n");
-        printf("    锡点 A=1, B=2, C=3 不变\n");
-        printf("    X, Y 随机选取（X!=Y，且都不等于 1,2,3）\n");
-        printf("  保证：FIFO 3帧缺页 < 4帧缺页，100%%%% 触发 Belady 异常\n\n");
+        printf("  方法：随机生成长度 12 的页面引用串（页面号 1~5），\n");
+        printf("        用 FIFO 分别在 3 帧和 4 帧下运行，\n");
+        printf("        若 FIFO(4帧)缺页 > FIFO(3帧)缺页，则触发 Belady 异常，\n");
+        printf("        否则重新随机生成，直到找到为止。\n\n");
 
         /* 打开 CSV 文件 */
         csv_belady = fopen("page_fault_belady.csv", "w");
         if (csv_belady) {
             write_utf8_bom(csv_belady);
-            fprintf(csv_belady, "轮次,X,Y,序列,FIFO(3帧)缺页,FIFO(4帧)缺页,异常触发\n");
+            fprintf(csv_belady, "轮次,尝试次数,序列,FIFO(3帧)缺页,FIFO(4帧)缺页\n");
         }
 
-        printf("  轮次 |  X  |  Y  | 生成序列                          | FIFO(3帧) | FIFO(4帧) | 结果\n");
-        printf("  -----+-----+-----+----------------------------------+----------+----------+------\n");
+        printf("  轮次 | 尝试次数 | 生成序列                           | FIFO(3帧) | FIFO(4帧) | 结果\n");
+        printf("  -----+----------+--------------------------------------+----------+----------+--------\n");
 
         for (round = 1; round <= 5; round++) {
-            /* 用构造规则生成序列（页面号范围 0~19，X,Y 从 4~19 中选） */
-            belady_len = generate_belady_sequence(belady_seq, 20);
+            attempts = 0;
 
-            /* 分别在 3 帧和 4 帧下运行 FIFO */
-            faults_3 = fifo_replace(belady_seq, belady_len, 3, 0);
-            faults_4 = fifo_replace(belady_seq, belady_len, 4, 0);
+            /* 枚举：不断随机生成，直到找到触发 Belady 异常的序列 */
+            do {
+                generate_random_sequence(belady_seq, belady_len, 5);
+                /* 页面号调整为 1~5（原生成 0~4） */
+                for (i = 0; i < belady_len; i++) belady_seq[i] += 1;
+                faults_3 = fifo_replace(belady_seq, belady_len, 3, 0);
+                faults_4 = fifo_replace(belady_seq, belady_len, 4, 0);
+                attempts++;
+            } while (faults_4 <= faults_3);
 
-            /* 打印本轮结果 */
-            printf("  %3d  | %3d | %3d | [", round, belady_seq[3], belady_seq[6]);
+            /* 找到了，打印结果 */
+            printf("  %3d  | %6d   | [", round, attempts);
             for (i = 0; i < belady_len; i++) {
                 printf("%d%s", belady_seq[i], (i < belady_len - 1) ? "," : "");
             }
-            printf("] | %6d   | %6d   | %s\n",
-                   faults_3, faults_4,
-                   (faults_4 > faults_3) ? "异常!" : "正常");
-
-            if (faults_4 > faults_3) success_count++;
+            printf("] | %6d   | %6d   | 异常!\n", faults_3, faults_4);
 
             /* 写入 CSV */
             if (csv_belady) {
-                fprintf(csv_belady, "%d,%d,%d,\"", round, belady_seq[3], belady_seq[6]);
+                fprintf(csv_belady, "%d,%d,\"", round, attempts);
                 for (i = 0; i < belady_len; i++) {
                     fprintf(csv_belady, "%d%s", belady_seq[i], (i < belady_len - 1) ? "," : "");
                 }
-                fprintf(csv_belady, "\",%d,%d,%s\n",
-                        faults_3, faults_4,
-                        (faults_4 > faults_3) ? "是" : "否");
+                fprintf(csv_belady, "\",%d,%d\n", faults_3, faults_4);
             }
 
-            /* 第 1 轮额外打印 3 帧和 4 帧的详细过程 */
+            /* 第 1 轮打印详细 FIFO 过程 */
             if (round == 1) {
                 printf("\n  --- 第1轮详细过程：FIFO（3 帧）---\n");
                 fifo_replace(belady_seq, belady_len, 3, 1);
@@ -958,16 +936,16 @@ static void task2_page_replacement(void)
             }
         }
 
-        printf("\n  [统计] 5 轮中 %d 轮成功触发 Belady 异常（应为 5/5）\n", success_count);
+        printf("\n  [统计] 5 轮全部成功找到触发 Belady 异常的随机序列\n");
 
         if (csv_belady) {
             fclose(csv_belady);
             printf("  [CSV] Belady 异常数据已保存到 page_fault_belady.csv\n\n");
         }
 
-        printf("  [结论] 固定骨架 [1,2,3,X,1,2,Y,1,2,3,X,Y]，\n");
-        printf("         只随机换 X、Y 两个数字，每次都 100%%%% 触发 Belady 异常：\n");
-        printf("         FIFO 3帧缺页 < 4帧缺页，增加内存反而性能下降。\n\n");
+        printf("  [结论] 通过随机生成 + 枚举验证，每轮都能找到使 FIFO\n");
+        printf("         在 4 帧时缺页次数 > 3 帧的序列，证明 Belady 异常\n");
+        printf("         确实存在：增加内存反而可能导致 FIFO 性能下降。\n\n");
     }
 }
 
