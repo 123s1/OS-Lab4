@@ -408,6 +408,7 @@ static int fifo_replace(int pages[], int page_count, int frame_num, int verbose)
 
     /* 动态分配页帧数组，并初始化为 -1（表示空帧） */
     frames = (int *)malloc(sizeof(int) * frame_num);
+    if (frames == NULL) return 0;
     for (i = 0; i < frame_num; i++) {
         frames[i] = -1;      /* -1 表示该帧位置还没有装入任何页面 */
     }
@@ -474,6 +475,11 @@ static int lru_replace(int pages[], int page_count, int frame_num, int verbose)
     /* 动态分配页帧数组和时间戳数组 */
     frames    = (int *)malloc(sizeof(int) * frame_num);
     last_used = (int *)malloc(sizeof(int) * frame_num);
+    if (frames == NULL || last_used == NULL) {
+        free(frames);
+        free(last_used);
+        return 0;
+    }
     for (i = 0; i < frame_num; i++) {
         frames[i] = -1;       /* 初始化为空帧 */
         last_used[i] = -1;    /* 时间戳初始化为 -1 */
@@ -549,6 +555,7 @@ static int opt_replace(int pages[], int page_count, int frame_num, int verbose)
 
     /* 动态分配页帧数组，初始化为 -1（空帧） */
     frames = (int *)malloc(sizeof(int) * frame_num);
+    if (frames == NULL) return 0;
     for (i = 0; i < frame_num; i++) {
         frames[i] = -1;
     }
