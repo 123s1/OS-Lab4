@@ -531,6 +531,88 @@ static int lru_replace(int pages[], int page_count, int frame_num, int verbose)
 }
 
 /*
+ * OPT 最佳置换算法（Optimal / Belady 最优算法）
+ *
+ * 理论上的最优策略——淘汰将来最久不被访问的页面。
+ * 需要"未来知识"（向后扫描引用串），因此仅用于
+ * 作为对比基准，衡量 FIFO/LRU 与理论下限的差距。
+ *
+ * 参数与返回值同 fifo_replace
+ */
+static int opt_replace(int pages[], int page_count, int frame_num, int verbose)
+{
+    int *frames;             /* 物理页帧数组 */
+    int fault_count = 0;     /* 缺页次数 */
+    int current_size = 0;    /* 当前已装入的页帧数 */
+    int i, j, k;
+    int hit;
+
+    /* 动态分配页帧数组，初始化为 -1（空帧） */
+    frames = (int *)malloc(sizeof(int) * frame_num);
+    for (i = 0; i < frame_num; i++) {
+        frames[i] = -1;
+    }
+
+    /* 遍历每一个页面访问请求 */
+    for (i = 0; i < page_count; i++) {
+        /* 检查页面是否已在内存中 */
+        hit = 0;
+        for (j = 0; j < current_size; j++) {
+            if (frames[j] == pages[i]) {
+                hit = 1;     /* 命中，OPT 不需要做任何更新 */
+                break;
+            }
+        }
+
+        if (!hit) {
+            /* 缺页：目标页面不在内存中 */
+            fault_count++;
+            if (current_size < frame_num) {
+                /* 帧未满：直接放入下一个空位 */
+                frames[current_size] = pages[i];
+                current_size++;
+            } else {
+                /*
+                 * 帧已满：选择"将来最久不被访问"的页面淘汰
+                 * 对每个帧中的页面，向后扫描引用串找下一次出现位置，
+                 * 淘汰下次出现最远（或永远不再出现）的页面
+                 */
+                int victim = 0;       /* 要淘汰的帧索引 */
+                int farthest = -1;    /* 记录最远的下次使用位置 */
+                for (j = 0; j < frame_num; j++) {
+                    int next_use = page_count;  /* 默认：永远不再使用 */
+                    for (k = i + 1; k < page_count; k++) {
+                        if (pages[k] == frames[j]) {
+                            next_use = k;       /* 找到下次使用位置 */
+                            break;
+                        }
+                    }
+                    if (next_use > farthest) {
+                        farthest = next_use;
+                        victim = j;             /* 更新淘汰目标 */
+                    }
+                }
+                frames[victim] = pages[i];
+            }
+        }
+
+        /* 打印当前步骤的内存状态 */
+        if (verbose) {
+            printf("  访问页面: %d | 内存状态: ", pages[i]);
+            for (j = 0; j < frame_num; j++) {
+                if (frames[j] == -1) printf("[ ]");
+                else                 printf("[%d]", frames[j]);
+            }
+            printf(" | %s | 缺页次数: %d\n",
+                   hit ? "命中" : "缺页", fault_count);
+        }
+    }
+
+    free(frames);
+    return fault_count;
+}
+
+/*
  * 生成具有时间局部性和空间局部性的页面引用串
  *
  * 策略：以 80% 的概率访问最近 3 个页面附近（±1），
@@ -584,11 +666,11 @@ static void write_utf8_bom(FILE *fp)
 static void task2_page_replacement(void)
 {
     int i, f;
-    int faults_fifo, faults_lru;
+    int faults_fifo, faults_lru, faults_opt;
     FILE *csv_file;
 
     printf("\n==========================================================\n");
-    printf("  任务2：页面置换算法模拟（FIFO / LRU）\n");
+    printf("  任务2：页面置换算法模拟（FIFO / LRU / OPT）\n");
     printf("==========================================================\n\n");
 
     /*
@@ -649,7 +731,7 @@ static void task2_page_replacement(void)
     /*
      * ---- 2.2 随机序列测试 ----
      * 生成长度 1000 的随机页面引用串（页面号 0~9），
-     * 统计物理块数从 1 增加到 10 时，FIFO 和 LRU 的缺页率变化，
+     * 统计物理块数从 1 增加到 10 时，三种算法（FIFO / LRU / OPT）的缺页率变化，
      * 并将结果输出到 CSV 文件
      */
     {
@@ -673,30 +755,36 @@ static void task2_page_replacement(void)
         csv_file = fopen("page_fault_data.csv", "w");
         if (csv_file) {
             write_utf8_bom(csv_file);
-            fprintf(csv_file, "物理块数,FIFO缺页次数,FIFO缺页率(%%),LRU缺页次数,LRU缺页率(%%)\n");
+            fprintf(csv_file, "物理块数,FIFO缺页次数,FIFO缺页率(%%),"
+                    "LRU缺页次数,LRU缺页率(%%),"
+                    "OPT缺页次数,OPT缺页率(%%)\n");
         }
 
-        printf("  物理块数 | FIFO缺页次数 | FIFO缺页率 | LRU缺页次数 | LRU缺页率\n");
-        printf("  ---------+--------------+------------+-------------+-----------\n");
+        printf("  物理块数 | FIFO缺页 | FIFO缺页率 | LRU缺页 | LRU缺页率 | OPT缺页 | OPT缺页率\n");
+        printf("  ---------+----------+------------+---------+-----------+---------+-----------\n");
 
-        /* 物理块数从 1 到 10，逐步测试两种算法 */
+        /* 物理块数从 1 到 10，逐步测试三种算法 */
         for (f = 1; f <= 10; f++) {
-            double rate_fifo, rate_lru;
+            double rate_fifo, rate_lru, rate_opt;
             /* verbose=0 不打印每步详情，只统计缺页次数 */
             faults_fifo = fifo_replace(random_seq, seq_len, f, 0);
             faults_lru  = lru_replace(random_seq, seq_len, f, 0);
+            faults_opt  = opt_replace(random_seq, seq_len, f, 0);
             /* 计算缺页率 = 缺页次数 / 总访问次数 × 100% */
             rate_fifo = (double)faults_fifo / seq_len * 100.0;
             rate_lru  = (double)faults_lru / seq_len * 100.0;
+            rate_opt  = (double)faults_opt / seq_len * 100.0;
 
             /* 打印到控制台 */
-            printf("  %5d    | %8d     | %7.1f%%   | %8d    | %7.1f%%\n",
-                   f, faults_fifo, rate_fifo, faults_lru, rate_lru);
+            printf("  %5d    | %6d   | %7.1f%%   | %5d   | %7.1f%%   | %5d   | %7.1f%%\n",
+                   f, faults_fifo, rate_fifo, faults_lru, rate_lru,
+                   faults_opt, rate_opt);
 
             /* 同时写入 CSV 文件 */
             if (csv_file) {
-                fprintf(csv_file, "%d,%d,%.1f,%d,%.1f\n",
-                        f, faults_fifo, rate_fifo, faults_lru, rate_lru);
+                fprintf(csv_file, "%d,%d,%.1f,%d,%.1f,%d,%.1f\n",
+                        f, faults_fifo, rate_fifo, faults_lru, rate_lru,
+                        faults_opt, rate_opt);
             }
         }
         printf("\n");
@@ -708,57 +796,42 @@ static void task2_page_replacement(void)
     }
 
     /*
-     * ---- 2.3 局部性原理模拟 ----
-     * 生成具有时间局部性和空间局部性的页面访问序列，
-     * 对比 LRU 和 FIFO 在此场景下的表现差异
+     * ---- 2.3 局部性原理模拟（演示） ----
+     * 生成一段较短的（长度 20）具有局部性的页面访问序列，
+     * 展示序列本身的局部性特征，并在 4 个物理块下对比 FIFO 和 LRU
      */
     {
         int locality_seq[MAX_PAGES];  /* 局部性序列存储数组 */
-        int seq_len = 1000;           /* 序列长度 */
-        int max_page = 10;            /* 页面号范围 */
-        FILE *csv_locality;           /* 局部性测试 CSV 文件指针 */
+        int seq_len = 20;             /* 短序列，便于展示 */
+        int max_page = 10;            /* 页面号范围 0~9 */
+        int demo_frames = 4;          /* 演示用物理块数 */
 
         printf("──────────────────────────────────────────\n");
-        printf("  局部性原理模拟（具有时间/空间局部性的序列）\n");
+        printf("  局部性原理模拟（演示）\n");
         printf("──────────────────────────────────────────\n");
+        printf("  生成规则：80%% 概率访问当前页附近（offset ∈ {-1,0,+1}），\n");
+        printf("            20%% 概率随机跳转到任意页面。\n\n");
 
         /* 生成具有局部性的页面访问序列 */
         generate_locality_sequence(locality_seq, seq_len, max_page);
 
-        /* 打开局部性测试结果 CSV 文件 */
-        csv_locality = fopen("page_fault_locality.csv", "w");
-        if (csv_locality) {
-            write_utf8_bom(csv_locality);
-            fprintf(csv_locality, "物理块数,FIFO缺页次数,FIFO缺页率(%%),LRU缺页次数,LRU缺页率(%%)\n");
+        /* 展示生成的访问序列 */
+        printf("  生成的局部性访问序列（长度 %d）：\n  [", seq_len);
+        for (i = 0; i < seq_len; i++) {
+            printf("%d%s", locality_seq[i], (i < seq_len - 1) ? ", " : "");
         }
+        printf("]\n\n");
 
-        printf("  物理块数 | FIFO缺页次数 | FIFO缺页率 | LRU缺页次数 | LRU缺页率\n");
-        printf("  ---------+--------------+------------+-------------+-----------\n");
+        /* 在 demo_frames 个物理块下，分别运行 FIFO 和 LRU，打印每步详情 */
+        printf("--- FIFO 算法（%d 帧）---\n", demo_frames);
+        faults_fifo = fifo_replace(locality_seq, seq_len, demo_frames, 1);
+        printf("  总缺页次数: %d, 缺页率: %.1f%%\n\n",
+               faults_fifo, (double)faults_fifo / seq_len * 100.0);
 
-        /* 物理块数 1~10，测试局部性序列下两种算法的表现 */
-        for (f = 1; f <= 10; f++) {
-            double rate_fifo, rate_lru;
-            faults_fifo = fifo_replace(locality_seq, seq_len, f, 0);
-            faults_lru  = lru_replace(locality_seq, seq_len, f, 0);
-            /* 计算缺页率并输出 */
-            rate_fifo = (double)faults_fifo / seq_len * 100.0;
-            rate_lru  = (double)faults_lru / seq_len * 100.0;
-
-            printf("  %5d    | %8d     | %7.1f%%   | %8d    | %7.1f%%\n",
-                   f, faults_fifo, rate_fifo, faults_lru, rate_lru);
-
-            /* 写入局部性测试 CSV 文件 */
-            if (csv_locality) {
-                fprintf(csv_locality, "%d,%d,%.1f,%d,%.1f\n",
-                        f, faults_fifo, rate_fifo, faults_lru, rate_lru);
-            }
-        }
-        printf("\n");
-
-        if (csv_locality) {
-            fclose(csv_locality);  /* 关闭局部性 CSV 文件 */
-            printf("  [CSV] 局部性序列测试数据已保存到 page_fault_locality.csv\n\n");
-        }
+        printf("--- LRU 算法（%d 帧）---\n", demo_frames);
+        faults_lru = lru_replace(locality_seq, seq_len, demo_frames, 1);
+        printf("  总缺页次数: %d, 缺页率: %.1f%%\n\n",
+               faults_lru, (double)faults_lru / seq_len * 100.0);
 
         printf("  [分析] 在具有局部性的序列中，LRU 通常优于 FIFO，\n");
         printf("         因为 LRU 能利用时间局部性保留近期频繁访问的页面。\n\n");
@@ -821,7 +894,7 @@ static void task2_page_replacement(void)
  * ============================================================
  * 程序入口点。
  * 依次执行任务1和任务2，两个任务自动连续运行。
- * 运行结束后在当前目录生成 3 个 CSV 文件。
+ * 运行结束后在当前目录生成 2 个 CSV 文件。
  * ============================================================ */
 int main(void)
 {
@@ -838,8 +911,8 @@ int main(void)
     /* 执行任务1：动态分区分配模拟（首次适应算法 + 空闲块合并 + 碎片率统计） */
     task1_dynamic_partition();
 
-    /* 执行任务2：页面置换算法模拟（FIFO/LRU + 随机测试 + 局部性 + Belady） */
-    /* 任务2 会自动生成 3 个 CSV 文件，用于 Excel 绘制对比曲线图 */
+    /* 执行任务2：页面置换算法模拟（FIFO/LRU/OPT + 随机测试 + 局部性 + Belady） */
+    /* 任务2 会自动生成 2 个 CSV 文件（随机序列 + Belady），用于 Excel 绘制对比曲线图 */
     task2_page_replacement();
 
     printf("==========================================================\n");
